@@ -1,0 +1,59 @@
+# --- Dependencies & System ---
+node_modules/
+/dist
+/build
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+# Keep package-lock.json if you want to lock versions, but often excluded in simple solo projects. 
+# Recommended to KEEP it for stability, but if you have conflicts, you can ignore it.
+# For this project, I recommend KEEPING it, so I commented it out.
+
+# --- Python & Superset (if running locally/custom scripts) ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# --- Environment Variables & Secrets (CRITICAL) ---
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+*.key
+
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Data Files (Do not commit huge raw data) ---
+# Ignore raw CSVs/Excels to keep repo light & secure
+# You can whitelist specific example files with "!" if needed
+*.csv
+*.xlsx
+*.xls
+*.json
+!package.json
+!tsconfig.json
+
+# --- Docker ---
+docker-compose.override.yml
+.docker/
+
+# --- n8n ---
+# If you have local n8n execution data
+.n8n/
+
+# --- Logs ---
+logs/
+*.log
