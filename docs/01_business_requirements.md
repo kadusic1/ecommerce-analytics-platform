@@ -1,5 +1,5 @@
 # Business Requirements Document
-**E-Commerce BI Project** | January 19, 2026
+**E-Commerce BI Project** | January 20, 2026
 
 ---
 
@@ -7,13 +7,15 @@
 
 **Industry:** Online Retail - Home Décor & Gifts  
 **Market:** UK (90%) + 37 International Countries  
-**Data:** 541K transactions, 4.4K customers, 4K products (Dec 2010 - Dec 2011)
+**Data:** 541K transactions, 4.4K registered customers + 3.7K guest orders, 4K products (Dec 2010 - Dec 2011)
 
 ### Key Observations
-- 25% transactions are guest checkouts (no Customer ID)
-- 1.7% return rate (Invoice IDs prefixed with "C")
-- Bulk B2B orders detected (80K+ units in single transactions)
-- Top customers show 15-27% return rates
+- **Data volume:** 541,909 line items across 25,900 unique invoices
+- **Guest checkouts:** 25% of transactions (no Customer ID)
+- **Returns:** 3,836 return invoices (14.8% of orders) containing 9,288 returned line items (1.7% of total)
+- **Sales vs Returns:** 22,064 sale invoices vs 3,836 return invoices
+- **Bulk B2B orders:** Detected (80K+ units in single transactions)
+- **High-value customer behavior:** Top customers show 15-27% return rates
 
 ---
 
@@ -29,7 +31,7 @@
 
 ## 3. Key Performance Indicators (5 Priority KPIs)
 
-### KPI 1: Monthly Gross Revenue
+### KPI 1: Monthly Net Revenue
 **Formula:** `SUM(Quantity × Price) - ABS(SUM(Returns))`  
 **Why:** Primary business health indicator  
 **Target:** 5-10% month-over-month growth  
@@ -39,7 +41,8 @@
 **Formula:** `(Customers with 2+ Purchases ÷ Total Customers) × 100`  
 **Why:** Retention is 5-7x cheaper than acquisition  
 **Target:** >30% retention rate  
-**Chart:** KPI card with historical comparison
+**Chart:** KPI card with historical comparison  
+**Note:** Excludes guest checkouts
 
 ### KPI 3: Top 20 Products by Revenue
 **Formula:** `SUM(Quantity × Price) GROUP BY Product`  
@@ -51,7 +54,8 @@
 **Formula:** `(Return Invoices ÷ Total Invoices) × 100`  
 **Why:** Quality and expectation issues  
 **Target:** <5% return rate  
-**Chart:** Monthly trend line
+**Chart:** Monthly trend line  
+**Note:** Measured at invoice level (14.8% current), not line-item level (1.7%)
 
 ### KPI 5: Revenue by Country (Top 10 Non-UK)
 **Formula:** `SUM(Revenue) GROUP BY Country WHERE Country != 'UK'`  
@@ -61,49 +65,9 @@
 
 ---
 
-## 4. Data Warehouse Design (Star Schema)
+**See Also:**
+- `02_dwh_schema.md` - Data warehouse design (Star Schema)
+- `03_elt_pipeline.md` - ETL pipeline technical guide
 
-**Fact Table:** `fact_sales`
-- Grain: Transaction line level
-- Measures: `quantity`, `unit_price`, `line_total`
-- Foreign Keys: `date_key`, `customer_key`, `product_key`
-
-**Dimensions:**
-- `dim_date`: Date hierarchy (day → month → quarter → year)
-- `dim_customer`: `customer_id`, `country`, `first_purchase_date`
-- `dim_product`: `stock_code`, `description`, `category`
-
-**Aggregate Tables (for performance):**
-- `agg_monthly_revenue`: Pre-calculated monthly KPIs
-- `agg_product_performance`: Product-level metrics
-
----
-
-## 5. Implementation Phases
-
-| Phase | Deliverable |
-|-------|-------------|
-| 1. Data Foundation | Star Schema + ETL pipeline |
-| 2. KPI Development | Calculate 5 KPIs in `dwh` schema |
-| 3. Dashboards | Superset visualizations |
-| 4. Deployment | UAT + Training |
-
----
-
-## 6. Success Criteria
-
-**Technical:**
-- [ ] ETL runs daily with <1% error rate
-- [ ] Dashboard loads in <3 seconds
-
-**Business:**
-- [ ] All 5 KPIs visible and accurate
-- [ ] 100% stakeholder training within 2 weeks
-
-**Data Quality:**
-- [ ] <0.1% nulls in dimension keys
-- [ ] 100% referential integrity
-
----
-
-**END OF DOCUMENT**
+**DOCUMENT VERSION:** 1.0  
+**LAST UPDATED:** January 20, 2026
