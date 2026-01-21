@@ -1,7 +1,7 @@
 # ELT Pipeline Guide
 **Extract, Load, Transform Pipeline** | January 22, 2026
 
-**Orchestration:** n8n | **Database:** PostgreSQL 17.7 | **Refresh:** Daily 2 AM UTC
+**Orchestration:** n8n | **Database:** PostgreSQL 17.7
 
 ---
 
@@ -345,7 +345,22 @@ SELECT
 
 ---
 
-## 6. Troubleshooting
+## 6. n8n Workflow Configuration
+
+**Demo Mode Setup:**
+* **Trigger:** n8n "Manual Trigger".
+* **Error Handling:** Workflow has a dedicated **Error Trigger** node connected to a **Gmail/Email** node.
+* **Node Settings:** All SQL nodes set to `Continue on Fail = FALSE` to ensure the
+pipeline stops and alerts on errors.
+    - `Wait Between Retries = 0` (Immediate failure for demo speed).
+
+**Email Notification Payload:**
+> **Subject:** ETL Pipeline Failure: {{ $workflow.name }}
+> **Body:** Node '{{ $error.node.name }}' failed with message: {{ $error.message }}
+
+---
+
+## 7. Troubleshooting
 
 **If the pipeline fails:**
 
