@@ -68,21 +68,30 @@ TRUNCATE TABLE source.ecommerce_raw;
 
 ### Checkpoint #2: Critical NULLs
 
-**Logic:** If InvoiceNo (PK) is missing, we cannot process the data.
+**Logic:** Fail if any row lacks the essential keys needed to build the Star Schema
+(`InvoiceNo`, `StockCode`, `InvoiceDate`).
 
 ```sql
--- Check for critical NULLs in the primary key (invoiceno).
--- If any rows have a missing or empty InvoiceNo, they are considered invalid and will halt the pipeline.
+-- Check for critical NULLs in the primary identifying columns.
+-- 1. InvoiceNo: The Primary Key of the transaction.
+-- 2. StockCode: Required to link to dim_product.
+-- 3. InvoiceDate: Required to link to dim_date.
+-- Note: We DO NOT check CustomerID here (NULL = Guest) or Quantity/Price (filtered in Phase 2).
 SELECT COUNT(*) as bad_rows
 FROM source.ecommerce_raw
-WHERE invoiceno IS NULL OR TRIM(invoiceno) = '';
+WHERE 
+   (invoiceno IS NULL OR TRIM(invoiceno) = '')
+   OR 
+   (stockcode IS NULL OR TRIM(stockcode) = '')
+   OR 
+   (invoicedate IS NULL OR TRIM(invoicedate) = '');
 ```
 
 ```javascript
 // n8n JavaScript Validator
 const badRows = items[0].json.bad_rows;
 if (badRows > 0) {
-    throw new Error(`CRITICAL: Found ${badRows} rows with NULL InvoiceNo. Pipeline stopped.`);
+    throw new Error(`CRITICAL: Found ${badRows} rows with missing InvoiceNo, StockCode, or Date. Pipeline stopped.`);
 }
 return [{ json: { status: 'PASS' }}];
 ```
