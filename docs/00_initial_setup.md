@@ -7,25 +7,7 @@
 
 ---
 
-## 1. Create Error Logging Table
-
-**Purpose:** Capture type casting and transformation errors during ELT runs.
-
-```sql
-CREATE TABLE IF NOT EXISTS staging.etl_errors (
-    error_id SERIAL PRIMARY KEY,
-    error_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    error_phase VARCHAR(50),
-    error_message TEXT,
-    row_data JSONB
-);
-```
-
-**Tool:** PostgreSQL Execute Query (run manually or via n8n setup workflow)
-
----
-
-## 2. Create Product Category Lookup Table
+## 1. Create Product Category Lookup Table
 
 **Purpose:** Reference data for categorizing products in `dwh.dim_product`.
 
@@ -61,15 +43,11 @@ ON CONFLICT (keyword) DO NOTHING;
 
 ---
 
-## 3. Verification
+## 2. Verification
 
 **Check that tables were created successfully:**
 
 ```sql
--- Verify etl_errors table
-SELECT COUNT(*) FROM staging.etl_errors;
--- Expected: 0 (empty, ready for logging)
-
 -- Verify category lookup table
 SELECT COUNT(*) FROM staging.product_category_lookup;
 -- Expected: 16 (all keywords loaded)
