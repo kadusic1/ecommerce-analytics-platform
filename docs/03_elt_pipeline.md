@@ -9,26 +9,36 @@
 
 ```mermaid
 graph TD
-    A[Manual Trigger] --> B[Read CSV]
-    B --> C1[✓ Checkpoint #1: File Check]
-    C1 --> D[Truncate source.ecommerce_raw]
-    D --> E[Bulk Insert to source]
-    E --> C2[✓ Checkpoint #2: Critical NULLs]
-    C2 --> F[Create staging.clean_sales]
-    F --> C3[✓ Checkpoint #3: Quality Funnel]
-    C3 --> G[Load dim_date]
-    G --> H[Load dim_customer]
-    H --> I[Load dim_product]
-    I --> C4[✓ Checkpoint #4: Orphan Check]
-    C4 --> J[Load fact_sales]
-    J --> C5[✓ Checkpoint #5: Revenue Reconciliation]
-    C5 --> K[Success Notification]
+    A[Manual Trigger] --> B[Truncate source table]
+    B --> C[Read CSV from Disk]
+    C --> D[Extract from File]
+    D --> E[Loop Over Items - Batch 2000]
+    E --> F[Insert into source table]
+    F --> E
+    E --> G[Verify Load Count]
+    G --> H[✓ Checkpoint #1: File Check]
+    H --> I[Check Critical NULLs]
+    I --> J[✓ Checkpoint #2: Validation]
+    J --> K[Create staging.clean_sales]
+    K --> L[✓ Checkpoint #3: Quality Funnel]
+    L --> M[Load dim_date]
+    M --> N[Load dim_customer]
+    N --> O[Load dim_product]
+    O --> P[Check Orphans]
+    P --> Q[✓ Checkpoint #4: Validation]
+    Q --> R[Load fact_sales]
+    R --> S[Check Revenue]
+    S --> T[✓ Checkpoint #5: Validation]
+    T --> U[Audit Logging]
+    U --> V[Gmail Success]
+    
+    ERROR[Error Trigger] --> FAIL[Send Gmail Alert]
 ```
 
-**Phase 1:** CSV → `source.ecommerce_raw` (all TEXT)  
-**Phase 2:** Transform → `staging.clean_sales` (typed, cleaned)  
+**Phase 1:** CSV → `source.ecommerce_raw` (all TEXT) using batched inserts  
+**Phase 2:** Transform → `staging.clean_sales` (typed, cleaned, aggregated)  
 **Phase 3:** Load → `dwh` schema (Star Schema)  
-**Phase 4:** Validation (5 Checkpoints)
+**Phase 4:** Validation (5 Checkpoints) + Audit Logging + Email Notifications
 
 **Prerequisites:**
 - Run [00_initial_setup.md](./00_initial_setup.md) once before first execution
@@ -37,46 +47,71 @@ graph TD
 
 ## 2. Phase 1: Extract & Load
 
-**Input:** `data.csv` (541,909 rows)  
-**Tool:** n8n CSV Read → PostgreSQL Bulk Insert
+**Input:** `/files/data.csv` (541,909 rows)  
+**Tool:** n8n File Reader → Extract from File → Batched PostgreSQL Insert (2000 rows per batch)
+
+### Step 1: Truncate Source Table
+
+**Logic:** Clear old data before loading fresh data to ensure no duplicates or stale records remain.
+
+```sql
+-- Clear the source table before starting a new load
+TRUNCATE TABLE source.ecommerce_raw;
+```
+
+### Step 2: Read & Extract CSV
+
+**Node Configuration:**
+- **Read/Write Files from Disk:** Reads `/files/data.csv`
+- **Extract from File:** Parses CSV and converts to JSON
+- **Loop Over Items:** Splits data into batches of 2000 rows for efficient bulk loading
+
+### Step 3: Batched Insert to Source
+
+**Logic:** Insert CSV rows into `source.ecommerce_raw` in batches of 2000. Uses `skipOnConflict` to avoid duplicate key errors.
+
+**Column Mapping:**
+```javascript
+{
+  "invoiceno": "={{ $json.InvoiceNo }}",
+  "stockcode": "={{ $json.StockCode }}",
+  "description": "={{ $json.Description }}",
+  "quantity": "={{ $json.Quantity }}",
+  "invoicedate": "={{ $json.InvoiceDate }}",
+  "unitprice": "={{ $json.UnitPrice }}",
+  "customerid": "={{ $json.CustomerID }}",
+  "country": "={{ $json.Country }}"
+}
+```
+
+### Step 4: Verify Load Count
+
+```sql
+-- Count total rows loaded into source table
+SELECT COUNT(*) as row_count FROM source.ecommerce_raw;
+```
 
 ### Checkpoint #1: File Validation
 
-**Logic:** Fail immediately if the file is empty.
+**Logic:** Fail immediately if no rows were loaded into the database.
 
 ```javascript
-// n8n JavaScript Node
-const actualRows = items.length;
-if (actualRows === 0) {
-    throw new Error("CRITICAL: Source file 'data.csv' is empty or unreadable.");
+// n8n Code Node
+const count = parseInt(items[0].json.row_count);
+
+if (count === 0) {
+    throw new Error("CRITICAL: 0 rows loaded into DB. Check file path or DB permissions.");
 }
-return [{ json: { status: 'PASS', rows_read: actualRows }}];
-```
 
-### Transaction-Safe Load
-
-**Logic:** Truncate and load raw data.
-
-```sql
--- Step 1: Clear old raw data from the source.ecommerce_raw table to ensure no duplicate or stale records remain before loading new data.
-TRUNCATE TABLE source.ecommerce_raw;
-
--- Step 2: Bulk Insert (handled by n8n "PostgreSQL Insert" node)
--- This step loads all rows from the CSV into the source.ecommerce_raw table, storing all fields as TEXT for maximum compatibility.
--- Columns: invoiceno, stockcode, description, quantity, invoicedate, unitprice, customerid, country
+return [{ json: { status: 'PASS', loaded_rows: count }}];
 ```
 
 ### Checkpoint #2: Critical NULLs
 
-**Logic:** Fail if any row lacks the essential keys needed to build the Star Schema
-(`InvoiceNo`, `StockCode`, `InvoiceDate`).
+**Logic:** Fail if any row lacks the essential keys needed to build the Star Schema (`InvoiceNo`, `StockCode`, `InvoiceDate`).
 
 ```sql
--- Check for critical NULLs in the primary identifying columns.
--- 1. InvoiceNo: The Primary Key of the transaction.
--- 2. StockCode: Required to link to dim_product.
--- 3. InvoiceDate: Required to link to dim_date.
--- Note: We DO NOT check CustomerID here (NULL = Guest) or Quantity/Price (filtered in Phase 2).
+-- Check for critical NULLs in primary identifying columns
 SELECT COUNT(*) as bad_rows
 FROM source.ecommerce_raw
 WHERE 
@@ -88,7 +123,7 @@ WHERE
 ```
 
 ```javascript
-// n8n JavaScript Validator
+// n8n Code Validator
 const badRows = items[0].json.bad_rows;
 if (badRows > 0) {
     throw new Error(`CRITICAL: Found ${badRows} rows with missing InvoiceNo, StockCode, or Date. Pipeline stopped.`);
@@ -100,43 +135,58 @@ return [{ json: { status: 'PASS' }}];
 
 ## 3. Phase 2: Transform
 
-### Transformation Logic (Cleaning)
+### Transformation Logic (Cleaning & Aggregation)
 
 **Logic:**
-1. Cast strings to numbers/dates
-2. Filter out bad data (Quantity=0, Price<0)
-3. **Implicit Error Handling:** Bad rows are simply dropped here. We measure the loss in the "Funnel" later.
+1. Cast TEXT strings to proper data types (INTEGER, NUMERIC, TIMESTAMP, DATE)
+2. Filter out invalid rows (Quantity=0)
+3. Aggregate duplicate InvoiceNo+StockCode combinations using GROUP BY
+4. Detect RETURNS by checking for 'C' prefix in InvoiceNo OR negative quantity
 
 ```sql
--- 1. Drop the table to start fresh
+-- Drop and recreate the staging table with cleaned, aggregated data
 DROP TABLE IF EXISTS staging.clean_sales;
 
--- 2. Create the table with AGGREGATION
 CREATE TABLE staging.clean_sales AS
 SELECT 
     invoiceno,
     stockcode,
-    
-    -- For attributes that are the same for the whole invoice/product, we just pick one (MAX)
     MAX(description) as description,
     MAX(country) as country,
-    MAX(TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI')) as invoice_timestamp,
-    MAX(DATE(TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI'))) as invoice_date,
-    MAX(LEFT(NULLIF(TRIM(customerid), ''), 20)) as customer_id,
-    
-    -- Determine transaction type
-    MAX(CASE WHEN LEFT(invoiceno, 1) = 'C' THEN 'RETURN' ELSE 'SALE' END) as transaction_type,
-
-    -- THE FIX: Sum the quantities and average the price
     SUM(CAST(quantity AS INTEGER)) as quantity, 
-    AVG(CAST(unitprice AS NUMERIC(10,2))) as unit_price
-
+    -- Use MAX for price because it's usually consistent per invoice/product
+    MAX(CAST(unitprice AS NUMERIC(10,2))) as unit_price,
+    MAX(TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI')) as invoice_timestamp,
+    MAX(LEFT(NULLIF(TRIM(customerid), ''), 20)) as customer_id,
+    -- IMPROVED: Identify returns by 'C' prefix OR negative quantity
+    CASE 
+        WHEN LEFT(invoiceno, 1) = 'C' OR SUM(CAST(quantity AS INTEGER)) < 0 THEN 'RETURN' 
+        ELSE 'SALE' 
+    END as transaction_type,
+    MAX(DATE(TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI'))) as invoice_date
 FROM source.ecommerce_raw
--- Filter out bad data before we group
-WHERE CAST(quantity AS INTEGER) != 0
-  AND CAST(unitprice AS NUMERIC(10,2)) > 0
--- THE MAGIC: This creates exactly one row per Product per Invoice
+WHERE CAST(quantity AS INTEGER) != 0 -- Only filter out true "Zero" rows
 GROUP BY invoiceno, stockcode;
+```
+
+### Checkpoint #3: Quality Funnel
+
+**Logic:** Measure data loss between source and staging to ensure transformation quality.
+
+```sql
+SELECT 
+    -- 1. Total valid rows in Raw (Everything except 0 quantity)
+    (SELECT COUNT(*) FROM source.ecommerce_raw WHERE CAST(quantity AS INTEGER) != 0) as "1. Raw Rows Received",
+    
+    -- 2. Unique groups we expect to see in Staging
+    (SELECT COUNT(DISTINCT (invoiceno || stockcode)) FROM source.ecommerce_raw WHERE CAST(quantity AS INTEGER) != 0) as "2. Expected Unique Rows",
+    
+    -- 3. Actual rows in Staging
+    (SELECT COUNT(*) FROM staging.clean_sales) as "3. Actual Staging Rows",
+    
+    -- 4. The Gap (Should be 0)
+    (SELECT COUNT(DISTINCT (invoiceno || stockcode)) FROM source.ecommerce_raw WHERE CAST(quantity AS INTEGER) != 0) 
+    - (SELECT COUNT(*) FROM staging.clean_sales) as "Data Loss Gap"
 ```
 
 ---
@@ -145,102 +195,78 @@ GROUP BY invoiceno, stockcode;
 
 ### 4.1 Load Dimensions
 
-**Logic:** Populate lookup tables.
+**Logic:** Populate lookup tables with dimensional data.
 
 #### Load Date Dimension
 
 ```sql
--- Populate the dwh.dim_date dimension table with a full calendar from 2010-01-01 to 2012-12-31.
--- Each row represents a unique date with attributes for reporting and analysis (day, month, quarter, etc.).
--- If a date_key already exists, skip it (no overwrite).
+-- Populate dim_date with full calendar from 2010-2012
 INSERT INTO dwh.dim_date (
-    date_key, 
-    full_date, 
-    day_of_week, 
-    day_of_month, 
-    month, 
-    month_name, 
-    quarter, 
-    year, 
-    is_weekend
+    date_key, full_date, day_of_week, day_of_month, month, month_name, quarter, year, is_weekend
 )
 SELECT 
-    TO_CHAR(d, 'YYYYMMDD')::INTEGER as date_key, -- Unique integer key for each date
-    d::DATE as full_date, -- The actual date
-    TRIM(TO_CHAR(d, 'Day')) as day_of_week, -- Name of the day (e.g., Monday)
-    EXTRACT(DAY FROM d)::INTEGER as day_of_month, -- Day of the month (1-31)
-    EXTRACT(MONTH FROM d)::INTEGER as month, -- Month number (1-12)
-    TRIM(TO_CHAR(d, 'Month')) as month_name, -- Full month name
-    EXTRACT(QUARTER FROM d)::INTEGER as quarter, -- Quarter (1-4)
-    EXTRACT(YEAR FROM d)::INTEGER as year, -- Year
-    EXTRACT(ISODOW FROM d) IN (6, 7) as is_weekend -- Boolean: true if Saturday or Sunday
+    TO_CHAR(d, 'YYYYMMDD')::INTEGER as date_key,
+    d::DATE as full_date,
+    TRIM(TO_CHAR(d, 'Day')) as day_of_week,
+    EXTRACT(DAY FROM d)::INTEGER as day_of_month,
+    EXTRACT(MONTH FROM d)::INTEGER as month,
+    TRIM(TO_CHAR(d, 'Month')) as month_name,
+    EXTRACT(QUARTER FROM d)::INTEGER as quarter,
+    EXTRACT(YEAR FROM d)::INTEGER as year,
+    EXTRACT(ISODOW FROM d) IN (6, 7) as is_weekend
 FROM generate_series('2010-01-01'::DATE, '2012-12-31'::DATE, '1 day') d
 ON CONFLICT (date_key) DO NOTHING;
-
--- Update table statistics for query planner optimization.
-ANALYZE dwh.dim_date;
 ```
 
-#### Load Customer Dimension (Registered + Guests)
+#### Load Customer Dimension
+
+**Logic:** Create customer records for both registered customers and guests (synthetic IDs using 'GST-' prefix).
 
 ```sql
--- Populate the dwh.dim_customer dimension table with unique customers.
--- Registered customers use their customer_id; guests are assigned a synthetic ID based on invoice number.
--- Also records the type (REGISTERED/GUEST) and the date of first purchase.
+-- Populate dim_customer with registered and guest customers
 INSERT INTO dwh.dim_customer (customer_id, customer_type, first_purchase_date)
 SELECT 
     DISTINCT 
     CASE 
         WHEN customer_id IS NOT NULL THEN customer_id 
         ELSE 'GST-' || invoiceno 
-    END as customer_id, -- Use real customer_id or generate guest ID
+    END as customer_id,
     CASE 
         WHEN customer_id IS NOT NULL THEN 'REGISTERED' 
         ELSE 'GUEST' 
-    END as customer_type, -- Classify as REGISTERED or GUEST
-    MIN(invoice_date) as first_purchase_date -- Earliest purchase date for this customer
+    END as customer_type,
+    MIN(invoice_date) as first_purchase_date
 FROM staging.clean_sales
 GROUP BY 1, 2
 ON CONFLICT (customer_id) DO NOTHING;
-
--- Update table statistics for query planner optimization.
-ANALYZE dwh.dim_customer;
 ```
 
-#### Load Product Dimension (with Categorization)
+#### Load Product Dimension
+
+**Logic:** Assign categories using keyword-based lookup from `staging.product_category_lookup`.
 
 ```sql
--- Populate the dwh.dim_product dimension table with unique products.
--- Assigns a category to each product using a lookup table (staging.product_category_lookup) based on description keywords.
--- If no match is found, defaults to 'Uncategorized'.
--- On conflict, updates description and category to keep product info current.
+-- Populate dim_product with categorized products
 INSERT INTO dwh.dim_product (stock_code, description, category)
 SELECT DISTINCT
-    stockcode, -- Product code
-    description, -- Product description
+    stockcode,
+    description,
     COALESCE(
         (SELECT category FROM staging.product_category_lookup 
          WHERE description ILIKE '%' || keyword || '%' 
          ORDER BY priority ASC LIMIT 1),
         'Uncategorized'
-    ) as category -- Assign category or default
+    ) as category
 FROM staging.clean_sales
-ON CONFLICT (stock_code) DO UPDATE 
-SET description = EXCLUDED.description, 
-    category = EXCLUDED.category;
-
--- Update table statistics for query planner optimization.
-ANALYZE dwh.dim_product;
+ON CONFLICT (stock_code) DO NOTHING;
 ```
 
 ### 4.2 Checkpoint #4: Orphan Check
 
-**Logic:** Ensure all sales link to valid dimensions.
+**Logic:** Ensure all sales link to valid dimensions before loading facts.
 
 ```sql
--- Check for orphan records in staging.clean_sales that do not have matching entries in the dimension tables.
--- Orphan products: sales with stockcode not found in dim_product.
--- Orphan dates: sales with invoice_date not found in dim_date.
+-- Check for orphan records that cannot link to dimensions
 SELECT 
     (SELECT COUNT(*) FROM staging.clean_sales s 
      WHERE NOT EXISTS (SELECT 1 FROM dwh.dim_product p WHERE p.stock_code = s.stockcode)) as orphan_products,
@@ -249,7 +275,7 @@ SELECT
 ```
 
 ```javascript
-// n8n JavaScript Validator
+// n8n Code Validator
 const p = items[0].json.orphan_products;
 const d = items[0].json.orphan_dates;
 
@@ -259,61 +285,46 @@ if (p > 100 || d > 100) {
 return [{ json: { status: 'PASS', orphan_products: p, orphan_dates: d }}];
 ```
 
-### 4.3 Load Facts
+### 4.3 Load Facts (Safe Mode)
+
+**Logic:** Load fact_sales with full referential integrity using surrogate keys from dimensions.
 
 ```sql
--- Load the fact_sales table with cleaned and fully mapped sales transactions.
--- Joins staging.clean_sales to all dimension tables to get surrogate keys.
--- Calculates line_total and classifies transaction type.
+-- Load fact_sales with proper surrogate key references
 INSERT INTO dwh.fact_sales (
-    date_key, 
-    customer_key, 
-    product_key, 
-    invoice_no, 
-    transaction_type, 
-    quantity, 
-    unit_price, 
-    line_total, 
-    country
+    date_key, customer_key, product_key, invoice_no, 
+    transaction_type, quantity, unit_price, line_total, country
 )
 SELECT 
-    d.date_key, -- Surrogate key for date
-    c.customer_key, -- Surrogate key for customer
-    p.product_key, -- Surrogate key for product
-    s.invoiceno, -- Invoice number
-    CASE WHEN s.quantity < 0 THEN 'RETURN' ELSE 'SALE' END, -- Transaction type
-    s.quantity, -- Quantity sold
-    s.unit_price, -- Price per unit
-    (s.quantity * s.unit_price) as line_total, -- Total for the line
-    s.country -- Country of sale
+    d.date_key,
+    c.customer_key,
+    p.product_key,
+    s.invoiceno,
+    CASE WHEN s.quantity < 0 THEN 'RETURN' ELSE 'SALE' END,
+    s.quantity,
+    s.unit_price,
+    (s.quantity * s.unit_price) as line_total,
+    s.country
 FROM staging.clean_sales s
-JOIN dwh.dim_date d 
-    ON d.full_date = s.invoice_date
-JOIN dwh.dim_product p 
-    ON p.stock_code = s.stockcode
-JOIN dwh.dim_customer c 
-    ON c.customer_id = CASE 
+JOIN dwh.dim_date d ON d.full_date = s.invoice_date
+JOIN dwh.dim_product p ON p.stock_code = s.stockcode
+JOIN dwh.dim_customer c ON c.customer_id = CASE 
         WHEN s.customer_id IS NOT NULL THEN s.customer_id 
         ELSE 'GST-' || s.invoiceno 
     END
--- THE ANTI-DUPLICATE SHIELD:
 ON CONFLICT (invoice_no, product_key) DO NOTHING;
-
--- Update table statistics for query planner optimization.
-ANALYZE dwh.fact_sales;
 ```
 
 ---
 
-## 5. Phase 4: Validation & Reporting
+## 5. Phase 4: Validation, Audit & Notifications
 
 ### Checkpoint #5: Revenue Reconciliation
 
-**Logic:** Compare Source CSV total vs. DWH Fact total.
+**Logic:** Compare total revenue between source and DWH to validate financial accuracy.
 
 ```sql
--- Revenue reconciliation: compare total revenue in the raw source data vs. the DWH fact table.
--- Calculates the sum of (quantity * unitprice) for valid rows in both tables and computes the percentage variance.
+-- Revenue reconciliation check
 WITH source_revenue AS (
     SELECT SUM(CAST(quantity AS INTEGER) * CAST(unitprice AS NUMERIC(10,2))) as total
     FROM source.ecommerce_raw
@@ -326,12 +337,12 @@ dwh_revenue AS (
 SELECT 
     s.total as source_rev, -- Total revenue from source
     d.total as dwh_rev, -- Total revenue from DWH
-    ROUND(ABS((s.total - d.total) / s.total) * 100, 2) as variance_pct -- % difference
+    ROUND(ABS((s.total - d.total) / s.total) * 100, 2) as variance_pct
 FROM source_revenue s, dwh_revenue d;
 ```
 
 ```javascript
-// n8n JavaScript Validator
+// n8n Code Validator
 const variance = parseFloat(items[0].json.variance_pct);
 if (variance > 1.0) {
     throw new Error(`REVENUE ERROR: Variance ${variance}% exceeds 1.0% limit.`);
@@ -339,63 +350,193 @@ if (variance > 1.0) {
 return [{ json: { status: 'PASS', variance: variance + '%' }}];
 ```
 
-### 📊 Final Project Health Report (The Funnel)
+### Audit Logging
 
-**Run this query to demonstrate "Data Quality" in your presentation.**
+**Logic:** Log key metrics from all checkpoints to `logging.audit` table for tracking pipeline health over time.
 
+**Logged Metrics:**
+- `raw_row_count`: Total rows loaded from CSV
+- `funnel_gap`: Rows lost during cleaning (Checkpoint #3)
+- `orphan_count`: Sum of orphan products + orphan dates (Checkpoint #4)
+- `revenue_variance_pct`: Revenue reconciliation variance (Checkpoint #5)
+
+**Insert Statement:**
 ```sql
-/* DATA QUALITY FUNNEL
-   Shows how many rows were rejected due to poor quality at each stage of the pipeline.
-   - 1. Raw Rows Received: Total rows loaded from CSV
-   - 2. Clean Rows Kept: Rows that passed cleaning and transformation
-   - 3. Rows Rejected (Dirty): Rows dropped due to quality filters
-   - 4. Final Loaded Facts: Rows successfully loaded into the fact table
-*/
-SELECT 
-    (SELECT COUNT(*) FROM source.ecommerce_raw) as "1. Raw Rows Received",
-    (SELECT COUNT(*) FROM staging.clean_sales) as "2. Clean Rows Kept",
-    (SELECT COUNT(*) FROM source.ecommerce_raw) - (SELECT COUNT(*) FROM staging.clean_sales) as "3. Rows Rejected (Dirty)",
-    (SELECT COUNT(*) FROM dwh.fact_sales) as "4. Final Loaded Facts";
+INSERT INTO logging.audit (
+    raw_row_count, 
+    funnel_gap, 
+    orphan_count, 
+    revenue_variance_pct
+)
+VALUES (
+    {{ checkpoint_1_loaded_rows }},
+    {{ checkpoint_3_gap }},
+    {{ checkpoint_4_orphans }},
+    {{ checkpoint_5_variance }}
+);
 ```
 
 ---
 
-## 6. n8n Workflow Configuration
+## 6. Email Notifications
 
-**Demo Mode Setup:**
-* **Trigger:** n8n "Manual Trigger".
-* **Error Handling:** Workflow has a dedicated **Error Trigger** node connected to a **Gmail/Email** node.
-* **Node Settings:** All SQL nodes set to `Continue on Fail = FALSE` to ensure the
-pipeline stops and alerts on errors.
-    - `Wait Between Retries = 0` (Immediate failure for demo speed).
+### Success Email
 
-**Email Notification Payload:**
-> **Subject:** ETL Pipeline Failure: {{ $workflow.name }}
-> **Body:** Node '{{ $error.node.name }}' failed with message: {{ $error.message }}
+**Trigger:** Pipeline completes all checkpoints successfully  
+**Recipient:** kadusicadi1@gmail.com  
+**Subject:** `✅ ELT Success: {{ $today.day }}.{{ $today.month }}.{{ $today.year }}`
+
+**Body Template:**
+```html
+<h3>✅ Pipeline Completed Successfully</h3>
+
+<b>SUMMARY:</b><br>
+----------------------------------<br>
+<b>Rows Loaded:</b> {{ $node["Verify Load Count"].json["row_count"] }}<br>
+<b>Revenue Variance:</b> {{ $node["Checkpoint #5: Validation"].json["variance"] }}<br>
+<b>Orphans Found:</b> {{ $node["Check Orphans"].json["orphan_products"] }} products / {{ $node["Check Orphans"].json["orphan_dates"] }} dates<br>
+<br>
+<b>AUDIT LOG:</b><br>
+----------------------------------<br>
+<b>Log Entry Created:</b> Yes<br>
+<b>Gap Check:</b> {{ $node["Checkpoint #3: Quality Funnel"].json["Data Loss Gap"] }} rows
+```
+
+### Failure Email
+
+**Trigger:** Error Trigger node catches any pipeline failure  
+**Recipient:** kadusicadi1@gmail.com  
+**Subject:** `🚨 ALERT: Pipeline Failed`
+
+**Body Template:**
+```html
+<h2 style="color: #D8000C;">🚨 CRITICAL FAILURE REPORT</h2>
+
+<b>STATUS:</b> <span style="color: red;"><strong>STOPPED</strong></span><br>
+The ELT pipeline has crashed due to an error.
+<br><br>
+
+<div style="border: 1px solid #D8000C; background-color: #FFBABA; padding: 10px; color: #D8000C;">
+    <b>🛑 ERROR DETAILS:</b><br>
+    <b>Message:</b> {{ $node["Error Trigger"].json["execution"]["error"]["message"] }}<br>
+    <b>Failed Node:</b> {{ $node["Error Trigger"].json["execution"]["lastNodeExecuted"] }}
+</div>
+<br>
+
+<b>TECHNICAL DATA:</b><br>
+----------------------------------<br>
+<b>Workflow ID:</b> {{ $workflow.id }}<br>
+<b>Execution ID:</b> {{ $execution.id }}<br>
+<b>Timestamp:</b> {{ $now }}<br>
+<br>
+
+<b>ACTION REQUIRED:</b><br>
+Please <a href="{{ $node["Error Trigger"].json["execution"]["url"] }}">click here to view the execution log</a> immediately.
+```
 
 ---
 
-## 7. Troubleshooting
+## 7. n8n Workflow Configuration
+
+**Workflow Name:** "ECommerce ELT"  
+**Trigger:** Manual Trigger  
+**Batch Size:** 2000 rows per insert  
+**Error Handling:** Dedicated Error Trigger → Gmail Alert
+
+**Critical Node Settings:**
+- All SQL nodes: `Continue on Fail = FALSE`
+- Loop Over Items: Batch size = 2000
+- Insert into source: `skipOnConflict = true`
+- All dimension/fact loads: `ON CONFLICT DO NOTHING`
+
+**Node Execution Order:**
+1. Manual Trigger
+2. Truncate source table
+3. Read/Write Files from Disk → Extract from File → Loop Over Items → Insert (batched)
+4. Verify Load Count → Checkpoint #1
+5. Check Critical NULLs → Checkpoint #2
+6. Create staging.clean_sales → Checkpoint #3
+7. Load dim_date → Load dim_customer → Load dim_product
+8. Check Orphans → Checkpoint #4
+9. Load fact_sales
+10. Check Revenue → Checkpoint #5
+11. Audit Logging → Gmail Success
+
+**Error Path:**
+- Error Trigger → Send Gmail Alert
+
+---
+
+## 8. Troubleshooting
 
 **If the pipeline fails:**
 
-1. **Check n8n Execution History:** Click the Red node to see the error message (e.g., "Found 500 NULL InvoiceNo").
+1. **Check Email Alert:** The failure email contains the exact error message and failed node name.
 
-2. **Check the Funnel:** Run the "Data Quality Funnel" query above to see if you are losing too much data.
+2. **Check n8n Execution History:** Open the workflow in n8n and click on the failed execution to see detailed logs.
 
-3. **Reset the DWH:**
-    ```sql
-    -- Reset the DWH by truncating all fact and dimension tables.
-    -- CASCADE ensures all dependent records are also removed.
-    -- RESTART IDENTITY resets any auto-incrementing keys.
-    TRUNCATE TABLE dwh.fact_sales CASCADE;
-    TRUNCATE TABLE dwh.dim_customer RESTART IDENTITY CASCADE;
-    TRUNCATE TABLE dwh.dim_product RESTART IDENTITY CASCADE;
-    TRUNCATE TABLE dwh.dim_date CASCADE;
-    ```
+3. **Check Audit Log:** Query `logging.audit` to see historical pipeline performance:
+   ```sql
+   SELECT * FROM logging.audit ORDER BY run_at DESC LIMIT 10;
+   ```
+
+4. **Check the Funnel:** Run Checkpoint #3 query manually to see data loss:
+   ```sql
+   SELECT 
+       (SELECT COUNT(*) FROM source.ecommerce_raw WHERE CAST(quantity AS INTEGER) != 0) as "Raw Rows",
+       (SELECT COUNT(*) FROM staging.clean_sales) as "Staging Rows",
+       (SELECT COUNT(*) FROM dwh.fact_sales) as "Fact Rows";
+   ```
+
+5. **Reset the DWH:**
+   ```sql
+   -- Full reset of DWH tables
+   TRUNCATE TABLE dwh.fact_sales CASCADE;
+   TRUNCATE TABLE dwh.dim_customer RESTART IDENTITY CASCADE;
+   TRUNCATE TABLE dwh.dim_product RESTART IDENTITY CASCADE;
+   TRUNCATE TABLE dwh.dim_date CASCADE;
+   ```
+
+6. **Reset Audit Log:**
+   ```sql
+   TRUNCATE TABLE logging.audit RESTART IDENTITY;
+   ```
 
 ---
 
-**DOCUMENT VERSION:** 4.0  
+## 9. Pipeline Health Metrics
+
+### Data Quality Funnel (Run after successful execution)
+
+```sql
+/* Shows data quality at each stage of the pipeline */
+SELECT 
+    (SELECT COUNT(*) FROM source.ecommerce_raw) as "1. Raw Rows Loaded",
+    (SELECT COUNT(*) FROM staging.clean_sales) as "2. Staging Rows (Cleaned)",
+    (SELECT COUNT(*) FROM dwh.fact_sales) as "3. Fact Rows (Final)",
+    (SELECT COUNT(*) FROM source.ecommerce_raw) - (SELECT COUNT(*) FROM staging.clean_sales) as "4. Rows Rejected (Dirty)",
+    (SELECT COUNT(*) FROM staging.clean_sales) - (SELECT COUNT(*) FROM dwh.fact_sales) as "5. Orphan Rows (No FK Match)";
+```
+
+### Audit Log Summary
+
+```sql
+/* View last 10 pipeline runs with key metrics */
+SELECT 
+    log_id,
+    run_at,
+    raw_row_count as "Rows Loaded",
+    funnel_gap as "Data Loss",
+    orphan_count as "Orphans",
+    revenue_variance_pct as "Revenue Variance %"
+FROM logging.audit
+ORDER BY run_at DESC
+LIMIT 10;
+```
+
+---
+
+**DOCUMENT VERSION:** 5.0 (SYNCHRONIZED WITH V2.JSON)  
 **LAST UPDATED:** January 22, 2026  
+**WORKFLOW FILE:** `/elt/V2.json`  
 **RELATED:** [02_dwh_schema.md](./02_dwh_schema.md) | [00_initial_setup.md](./00_initial_setup.md)
