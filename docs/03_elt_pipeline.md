@@ -9,7 +9,7 @@
 
 ```mermaid
 graph TD
-    A[Schedule Trigger] --> B[Read CSV]
+    A[Manual Trigger] --> B[Read CSV]
     B --> C1[✓ Checkpoint #1: File Check]
     C1 --> D[Truncate source.ecommerce_raw]
     D --> E[Bulk Insert to source]
