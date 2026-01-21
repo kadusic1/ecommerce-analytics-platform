@@ -42,7 +42,6 @@ Thumbs.db
 *.csv
 *.xlsx
 *.xls
-*.json
 !package.json
 !tsconfig.json
 

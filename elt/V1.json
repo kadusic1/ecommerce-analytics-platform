@@ -1,0 +1,724 @@
+{
+  "name": "BI Project ELT pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Checkpoint #1: Verify DB Load\nconst count = parseInt(items[0].json.row_count);\n\nif (count === 0) {\n    throw new Error(\"CRITICAL: 0 rows loaded into DB. Check file path or DB permissions.\");\n}\n\nreturn [{ json: { status: 'PASS', loaded_rows: count }}];"
+      },
+      "id": "c1e4c6a8-e0da-492a-8e62-4d3cc80028f9",
+      "name": "Checkpoint #1: File Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        -1072
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as row_count FROM source.ecommerce_raw;",
+        "options": {}
+      },
+      "id": "b85d91f1-872c-464f-ba1d-6ed69cb5114f",
+      "name": "Verify Load Count",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        272,
+        -1280
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "c684e30d-155d-4073-930d-bddd192f44cb",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -864,
+        -1264
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "TRUNCATE TABLE source.ecommerce_raw;",
+        "options": {}
+      },
+      "id": "89139860-986f-4627-b046-0d36972d42c2",
+      "name": "Truncate Source",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -640,
+        -1264
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Checkpoint #2: Critical NULLs\nSELECT COUNT(*) as bad_rows\nFROM source.ecommerce_raw\nWHERE \n   (invoiceno IS NULL OR TRIM(invoiceno) = '')\n   OR \n   (stockcode IS NULL OR TRIM(stockcode) = '')\n   OR \n   (invoicedate IS NULL OR TRIM(invoicedate) = '');",
+        "options": {}
+      },
+      "id": "166e43bd-1580-482a-b515-1472b7d777d3",
+      "name": "Check Critical NULLs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -912,
+        -848
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Checkpoint #2 Validator\nconst badRows = items[0].json.bad_rows;\nif (badRows > 0) {\n    throw new Error(`CRITICAL: Found ${badRows} rows with missing InvoiceNo, StockCode, or Date. Pipeline stopped.`);\n}\nreturn [{ json: { status: 'PASS' }}];"
+      },
+      "id": "1f8d81ba-8c6c-4ae1-b04c-c8ecf2fe74c3",
+      "name": "Checkpoint #2: Validation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -736,
+        -848
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Phase 2: Transform (Clean & Aggregate)\nDROP TABLE IF EXISTS staging.clean_sales;\n\nCREATE TABLE staging.clean_sales AS\nSELECT \n    invoiceno,\n    stockcode,\n    MAX(description) as description,\n    MAX(country) as country,\n    SUM(CAST(quantity AS INTEGER)) as quantity, \n    -- Use MAX for price because it's usually consistent per invoice/product\n    MAX(CAST(unitprice AS NUMERIC(10,2))) as unit_price,\n    MAX(TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI')) as invoice_timestamp,\n    MAX(LEFT(NULLIF(TRIM(customerid), ''), 20)) as customer_id,\n    -- IMPROVED: Identify returns by 'C' prefix OR negative quantity\n    CASE \n        WHEN LEFT(invoiceno, 1) = 'C' OR SUM(CAST(quantity AS INTEGER)) < 0 THEN 'RETURN' \n        ELSE 'SALE' \n    END as transaction_type,\n    MAX(DATE(TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI'))) as invoice_date\nFROM source.ecommerce_raw\nWHERE CAST(quantity AS INTEGER) != 0 -- Only filter out true \"Zero\" rows\nGROUP BY invoiceno, stockcode;",
+        "options": {}
+      },
+      "id": "e5840109-ae48-4020-815b-36c030d9b2e2",
+      "name": "Create staging.clean_sales",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -528,
+        -848
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n    -- 1. Total valid rows in Raw (Everything except 0 quantity)\n    (SELECT COUNT(*) FROM source.ecommerce_raw WHERE CAST(quantity AS INTEGER) != 0) as \"1. Raw Rows Received\",\n    \n    -- 2. Unique groups we expect to see in Staging\n    (SELECT COUNT(DISTINCT (invoiceno || stockcode)) FROM source.ecommerce_raw WHERE CAST(quantity AS INTEGER) != 0) as \"2. Expected Unique Rows\",\n    \n    -- 3. Actual rows in Staging\n    (SELECT COUNT(*) FROM staging.clean_sales) as \"3. Actual Staging Rows\",\n    \n    -- 4. The Gap (Should be 0)\n    (SELECT COUNT(DISTINCT (invoiceno || stockcode)) FROM source.ecommerce_raw WHERE CAST(quantity AS INTEGER) != 0) \n    - (SELECT COUNT(*) FROM staging.clean_sales) as \"Data Loss Gap\"",
+        "options": {}
+      },
+      "id": "81c75268-5719-40e8-a973-b6938f274d9c",
+      "name": "Checkpoint #3: Quality Funnel",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -288,
+        -848
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Load Date Dimension\nINSERT INTO dwh.dim_date (\n    date_key, full_date, day_of_week, day_of_month, month, month_name, quarter, year, is_weekend\n)\nSELECT \n    TO_CHAR(d, 'YYYYMMDD')::INTEGER as date_key,\n    d::DATE as full_date,\n    TRIM(TO_CHAR(d, 'Day')) as day_of_week,\n    EXTRACT(DAY FROM d)::INTEGER as day_of_month,\n    EXTRACT(MONTH FROM d)::INTEGER as month,\n    TRIM(TO_CHAR(d, 'Month')) as month_name,\n    EXTRACT(QUARTER FROM d)::INTEGER as quarter,\n    EXTRACT(YEAR FROM d)::INTEGER as year,\n    EXTRACT(ISODOW FROM d) IN (6, 7) as is_weekend\nFROM generate_series('2010-01-01'::DATE, '2012-12-31'::DATE, '1 day') d\nON CONFLICT (date_key) DO NOTHING;",
+        "options": {}
+      },
+      "id": "96ec8308-eb80-4392-8078-9a5e812aae2b",
+      "name": "Load dim_date",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -64,
+        -848
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Load Customer Dimension\nINSERT INTO dwh.dim_customer (customer_id, customer_type, first_purchase_date)\nSELECT \n    DISTINCT \n    CASE \n        WHEN customer_id IS NOT NULL THEN customer_id \n        ELSE 'GST-' || invoiceno \n    END as customer_id,\n    CASE \n        WHEN customer_id IS NOT NULL THEN 'REGISTERED' \n        ELSE 'GUEST' \n    END as customer_type,\n    MIN(invoice_date) as first_purchase_date\nFROM staging.clean_sales\nGROUP BY 1, 2\nON CONFLICT (customer_id) DO NOTHING;",
+        "options": {}
+      },
+      "id": "8a5fc004-4523-4492-883d-26a3abde3574",
+      "name": "Load dim_customer",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        160,
+        -848
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Load Product Dimension\nINSERT INTO dwh.dim_product (stock_code, description, category)\nSELECT DISTINCT\n    stockcode,\n    description,\n    COALESCE(\n        (SELECT category FROM staging.product_category_lookup \n         WHERE description ILIKE '%' || keyword || '%' \n         ORDER BY priority ASC LIMIT 1),\n        'Uncategorized'\n    ) as category\nFROM staging.clean_sales\nON CONFLICT (stock_code) DO NOTHING;",
+        "options": {}
+      },
+      "id": "8aae42ba-58d3-4149-b023-3030bd6c59e5",
+      "name": "Load dim_product",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        368,
+        -848
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Checkpoint #4: Orphan Check\nSELECT \n    (SELECT COUNT(*) FROM staging.clean_sales s \n     WHERE NOT EXISTS (SELECT 1 FROM dwh.dim_product p WHERE p.stock_code = s.stockcode)) as orphan_products,\n    (SELECT COUNT(*) FROM staging.clean_sales s \n     WHERE NOT EXISTS (SELECT 1 FROM dwh.dim_date d WHERE d.full_date = s.invoice_date)) as orphan_dates;",
+        "options": {}
+      },
+      "id": "df510fb3-904c-43db-b3e7-2b49117af9ea",
+      "name": "Check Orphans",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -944,
+        -640
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Checkpoint #4 Validator\nconst p = items[0].json.orphan_products;\nconst d = items[0].json.orphan_dates;\n\nif (p > 100 || d > 100) {\n    throw new Error(`ORPHAN ERROR: Missing ${p} Products and ${d} Dates in dimensions.`);\n}\nreturn [{ json: { status: 'PASS', orphan_products: p, orphan_dates: d }}];"
+      },
+      "id": "f3f97a6e-8275-4dde-9719-ab921215013d",
+      "name": "Checkpoint #4: Validation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -768,
+        -640
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Load Fact Sales (Safe Mode)\nINSERT INTO dwh.fact_sales (\n    date_key, customer_key, product_key, invoice_no, \n    transaction_type, quantity, unit_price, line_total, country\n)\nSELECT \n    d.date_key,\n    c.customer_key,\n    p.product_key,\n    s.invoiceno,\n    CASE WHEN s.quantity < 0 THEN 'RETURN' ELSE 'SALE' END,\n    s.quantity,\n    s.unit_price,\n    (s.quantity * s.unit_price) as line_total,\n    s.country\nFROM staging.clean_sales s\nJOIN dwh.dim_date d ON d.full_date = s.invoice_date\nJOIN dwh.dim_product p ON p.stock_code = s.stockcode\nJOIN dwh.dim_customer c ON c.customer_id = CASE \n        WHEN s.customer_id IS NOT NULL THEN s.customer_id \n        ELSE 'GST-' || s.invoiceno \n    END\nON CONFLICT (invoice_no, product_key) DO NOTHING;",
+        "options": {}
+      },
+      "id": "0f20adf9-7e74-47f9-b171-59ef93d61bbd",
+      "name": "Load fact_sales",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -576,
+        -656
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Checkpoint #5: Revenue Reconciliation\nWITH source_revenue AS (\n    SELECT SUM(CAST(quantity AS INTEGER) * CAST(unitprice AS NUMERIC(10,2))) as total\n    FROM source.ecommerce_raw\n    WHERE CAST(quantity AS INTEGER) != 0 \n      AND CAST(unitprice AS NUMERIC(10,2)) > 0\n),\ndwh_revenue AS (\n    SELECT SUM(line_total) as total FROM dwh.fact_sales\n)\nSELECT \n    s.total as source_rev, -- Total revenue from source\n    d.total as dwh_rev, -- Total revenue from DWH\n    ROUND(ABS((s.total - d.total) / s.total) * 100, 2) as variance_pct\nFROM source_revenue s, dwh_revenue d;",
+        "options": {}
+      },
+      "id": "62f211ba-a10b-4677-99da-53ae4d298fcc",
+      "name": "Check Revenue",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -368,
+        -656
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Checkpoint #5 Validator\nconst variance = parseFloat(items[0].json.variance_pct);\nif (variance > 1.0) {\n    throw new Error(`REVENUE ERROR: Variance ${variance}% exceeds 1.0% limit.`);\n}\nreturn [{ json: { status: 'PASS', variance: variance + '%' }}];"
+      },
+      "id": "6d0228b6-ae96-4d45-9d7b-0965bdc873a7",
+      "name": "Checkpoint #5: Validation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        -656
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Success!\nThe ELT Pipeline completed successfully. \nAll Data Quality checks passed."
+      },
+      "id": "f375c41c-349c-4a41-860d-e6fcd033f463",
+      "name": "Success",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        80,
+        -656
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/files/data.csv",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -432,
+        -1264
+      ],
+      "id": "83f88f32-7dee-4361-ae63-493b285c7b5f",
+      "name": "Read/Write Files from Disk"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -240,
+        -1264
+      ],
+      "id": "affd066a-0766-491f-b33f-6d7be3cc238e",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "source",
+          "mode": "list",
+          "cachedResultName": "source"
+        },
+        "table": {
+          "__rl": true,
+          "value": "ecommerce_raw",
+          "mode": "list",
+          "cachedResultName": "ecommerce_raw"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "invoiceno": "={{ $json.InvoiceNo }}",
+            "stockcode": "={{ $json.StockCode }}",
+            "description": "={{ $json.Description }}",
+            "quantity": "={{ $json.Quantity }}",
+            "invoicedate": "={{ $json.InvoiceDate }}",
+            "unitprice": "={{ $json.UnitPrice }}",
+            "customerid": "={{ $json.CustomerID }}",
+            "country": "={{$json.Country}}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "invoiceno",
+              "displayName": "invoiceno",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "stockcode",
+              "displayName": "stockcode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "description",
+              "displayName": "description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "quantity",
+              "displayName": "quantity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "invoicedate",
+              "displayName": "invoicedate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "unitprice",
+              "displayName": "unitprice",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "customerid",
+              "displayName": "customerid",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "country",
+              "displayName": "country",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        176,
+        -1136
+      ],
+      "id": "4149ad32-b149-4750-91b7-ab7f8609be3a",
+      "name": "Insert rows in a table",
+      "credentials": {
+        "postgres": {
+          "id": "bd5tzcw3zoQe5g9B",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 2000,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -32,
+        -1264
+      ],
+      "id": "9430cb25-d11a-4222-b813-d9197f8295f0",
+      "name": "Loop Over Items"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Verify Load Count": {
+      "main": [
+        [
+          {
+            "node": "Checkpoint #1: File Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Truncate Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Truncate Source": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checkpoint #1: File Check": {
+      "main": [
+        [
+          {
+            "node": "Check Critical NULLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Critical NULLs": {
+      "main": [
+        [
+          {
+            "node": "Checkpoint #2: Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checkpoint #2: Validation": {
+      "main": [
+        [
+          {
+            "node": "Create staging.clean_sales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create staging.clean_sales": {
+      "main": [
+        [
+          {
+            "node": "Checkpoint #3: Quality Funnel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checkpoint #3: Quality Funnel": {
+      "main": [
+        [
+          {
+            "node": "Load dim_date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load dim_date": {
+      "main": [
+        [
+          {
+            "node": "Load dim_customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load dim_customer": {
+      "main": [
+        [
+          {
+            "node": "Load dim_product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load dim_product": {
+      "main": [
+        [
+          {
+            "node": "Check Orphans",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Orphans": {
+      "main": [
+        [
+          {
+            "node": "Checkpoint #4: Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checkpoint #4: Validation": {
+      "main": [
+        [
+          {
+            "node": "Load fact_sales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load fact_sales": {
+      "main": [
+        [
+          {
+            "node": "Check Revenue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Revenue": {
+      "main": [
+        [
+          {
+            "node": "Checkpoint #5: Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read/Write Files from Disk": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Verify Load Count",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Insert rows in a table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert rows in a table": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "saveDataErrorExecution": "none",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "4baba435-c2b6-4741-8335-418ebe17687f",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "87bbcfed80f3317b4d85d6140b4aba5ab87c66a9d1cd7c7ede0347197c77aa93"
+  },
+  "id": "fIv1S82Y74e8uzsdeDfEp",
+  "tags": []
+}
