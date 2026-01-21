@@ -1,1 +1,0 @@
--- Defines the final Star Schema or Snowflake Schema (Facts and Dimensions)

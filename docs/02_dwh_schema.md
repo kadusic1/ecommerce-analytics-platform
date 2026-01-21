@@ -86,6 +86,11 @@ CREATE INDEX idx_fact_sales_type ON dwh.fact_sales(transaction_type);
 CREATE INDEX idx_fact_sales_country ON dwh.fact_sales(country);
 ```
 
+**Constraints:**
+```sql
+CONSTRAINT unique_invoice_item UNIQUE (invoice_no, product_key)
+```
+
 ---
 
 ## Dimension: `dwh.dim_customer`

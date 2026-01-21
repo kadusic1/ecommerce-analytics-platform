@@ -108,31 +108,35 @@ return [{ json: { status: 'PASS' }}];
 3. **Implicit Error Handling:** Bad rows are simply dropped here. We measure the loss in the "Funnel" later.
 
 ```sql
--- Drop the staging.clean_sales table if it exists to ensure a fresh transformation each run.
+-- 1. Drop the table to start fresh
 DROP TABLE IF EXISTS staging.clean_sales;
 
--- Create the staging.clean_sales table by transforming and cleaning raw data:
---  - Casts quantity and unitprice to numeric types
---  - Converts invoicedate to timestamp and date
---  - Normalizes customer_id and classifies transaction type
---  - Filters out rows with zero quantity or negative price (bad data)
+-- 2. Create the table with AGGREGATION
 CREATE TABLE staging.clean_sales AS
 SELECT 
-        invoiceno,
-        stockcode,
-        description,
-        country,
-        CAST(quantity AS INTEGER) as quantity, -- Convert quantity from TEXT to INTEGER
-        CAST(unitprice AS NUMERIC(10,2)) as unit_price, -- Convert unitprice from TEXT to NUMERIC
-        TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI') as invoice_timestamp, -- Parse invoice date/time
-        LEFT(NULLIF(TRIM(customerid), ''), 20) as customer_id, -- Clean and limit customer_id
-        CASE WHEN LEFT(invoiceno, 1) = 'C' THEN 'RETURN' ELSE 'SALE' END as transaction_type, -- Classify transaction
-        DATE(TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI')) as invoice_date -- Extract just the date
+    invoiceno,
+    stockcode,
+    
+    -- For attributes that are the same for the whole invoice/product, we just pick one (MAX)
+    MAX(description) as description,
+    MAX(country) as country,
+    MAX(TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI')) as invoice_timestamp,
+    MAX(DATE(TO_TIMESTAMP(invoicedate, 'MM/DD/YYYY HH24:MI'))) as invoice_date,
+    MAX(LEFT(NULLIF(TRIM(customerid), ''), 20)) as customer_id,
+    
+    -- Determine transaction type
+    MAX(CASE WHEN LEFT(invoiceno, 1) = 'C' THEN 'RETURN' ELSE 'SALE' END) as transaction_type,
+
+    -- THE FIX: Sum the quantities and average the price
+    SUM(CAST(quantity AS INTEGER)) as quantity, 
+    AVG(CAST(unitprice AS NUMERIC(10,2))) as unit_price
+
 FROM source.ecommerce_raw
--- DATA QUALITY FILTER:
--- Only keep rows with nonzero quantity and positive price; others are dropped and tracked in the funnel.
+-- Filter out bad data before we group
 WHERE CAST(quantity AS INTEGER) != 0
-    AND CAST(unitprice AS NUMERIC(10,2)) > 0;
+  AND CAST(unitprice AS NUMERIC(10,2)) > 0
+-- THE MAGIC: This creates exactly one row per Product per Invoice
+GROUP BY invoiceno, stockcode;
 ```
 
 ---
@@ -291,7 +295,9 @@ JOIN dwh.dim_customer c
     ON c.customer_id = CASE 
         WHEN s.customer_id IS NOT NULL THEN s.customer_id 
         ELSE 'GST-' || s.invoiceno 
-    END;
+    END
+-- THE ANTI-DUPLICATE SHIELD:
+ON CONFLICT (invoice_no, product_key) DO NOTHING;
 
 -- Update table statistics for query planner optimization.
 ANALYZE dwh.fact_sales;

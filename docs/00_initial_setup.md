@@ -1,60 +1,70 @@
 # Initial Setup
 **One-Time Database Initialization** | January 22, 2026
 
-**Run these scripts once during project initialization before the first ELT execution.**
-
-**Prerequisites:** Ensure schemas exist by running `database/00_init_schemas.sql` first.
+This guide walks you through the complete database setup required before running your first ELT pipeline.
 
 ---
 
-## 1. Create Product Category Lookup Table
+## Quick Start: Run All Setup Scripts
 
-**Purpose:** Reference data for categorizing products in `dwh.dim_product`.
+Execute the following scripts **in order** from the `database/` directory:
 
-```sql
-CREATE TABLE IF NOT EXISTS staging.product_category_lookup (
-    keyword VARCHAR(50) PRIMARY KEY,
-    category VARCHAR(100) NOT NULL,
-    priority INTEGER NOT NULL
-);
-
-INSERT INTO staging.product_category_lookup (keyword, category, priority)
-VALUES
-    ('MUG', 'Kitchenware', 1),
-    ('CUP', 'Kitchenware', 1),
-    ('PLATE', 'Kitchenware', 1),
-    ('TEAPOT', 'Kitchenware', 1),
-    ('HEART', 'Décor', 2),
-    ('CANDLE', 'Décor', 2),
-    ('FRAME', 'Décor', 2),
-    ('LANTERN', 'Décor', 2),
-    ('CHRISTMAS', 'Seasonal', 3),
-    ('HALLOWEEN', 'Seasonal', 3),
-    ('BAG', 'Accessories', 4),
-    ('PURSE', 'Accessories', 4),
-    ('NOTEBOOK', 'Stationery', 5),
-    ('CARD', 'Stationery', 5),
-    ('TOY', 'Toys & Games', 6),
-    ('GAME', 'Toys & Games', 6)
-ON CONFLICT (keyword) DO NOTHING;
+```bash
+# Execute all setup scripts in sequence
+psql "your_aiven_connection_string" -f database/01_init_schemas.sql
+psql "your_aiven_connection_string" -f database/02_ddl_tables.sql
+psql "your_aiven_connection_string" -f database/03_seed_data.sql
 ```
 
-**Maintenance:** Add new keywords by running additional INSERT statements as needed.
+---
+
+## What Each Script Does
+
+### 1. `01_init_schemas.sql`
+Creates the three-layer schema architecture:
+- `source` — Raw data landing zone
+- `staging` — Transformation and cleaning zone
+- `dwh` — Final Star Schema for reporting
+
+### 2. `02_ddl_tables.sql`
+Defines all table structures across all schemas:
+- **Source Layer:** `source.ecommerce_raw` (receives raw CSV)
+- **Staging Layer:** `staging.product_category_lookup` (reference data)
+- **DWH Layer:** Dimensions (`dim_date`, `dim_customer`, `dim_product`) and Fact table (`fact_sales`)
+
+### 3. `03_seed_data.sql`
+Populates the product category lookup table with 16 predefined keywords for product classification.
 
 ---
 
-## 2. Verification
+## Verification
 
-**Check that tables were created successfully:**
+After running all scripts, verify the setup:
 
 ```sql
--- Verify category lookup table
+-- Check schemas exist
+SELECT schema_name FROM information_schema.schemata 
+WHERE schema_name IN ('source', 'staging', 'dwh');
+
+-- Verify all tables created
+SELECT table_schema, table_name 
+FROM information_schema.tables 
+WHERE table_schema IN ('source', 'staging', 'dwh')
+ORDER BY table_schema, table_name;
+
+-- Confirm seed data loaded
 SELECT COUNT(*) FROM staging.product_category_lookup;
--- Expected: 16 (all keywords loaded)
+-- Expected: 16 rows
 ```
 
 ---
 
-**DOCUMENT VERSION:** 1.0  
-**LAST UPDATED:** January 22, 2026  
-**RELATED:** [03_elt_pipeline.md](./03_elt_pipeline.md) | [02_dwh_schema.md](./02_dwh_schema.md)
+## Clean Reset (Development Only)
+
+If you need to completely reset the database during development:
+
+```bash
+psql "your_aiven_connection_string"-f database/00_teardown.sql
+```
+
+Then re-run the setup scripts above.
