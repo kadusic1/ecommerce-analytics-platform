@@ -17,7 +17,7 @@ erDiagram
         int quantity
         numeric unit_price
         numeric line_total
-        string country
+        int country_key FK
     }
 
     dim_customer {
@@ -42,9 +42,18 @@ erDiagram
         string day_of_week
     }
 
+    dim_country {
+        int country_key PK
+        string original_name
+        string country_name
+        string continent
+        string iso_code
+    }
+
     fact_sales }|..|| dim_customer : "orders by"
     fact_sales }|..|| dim_product : "contains"
     fact_sales }|..|| dim_date : "happens on"
+    fact_sales }|..|| dim_country : "shipped to"
 ```
 
 ---
@@ -167,6 +176,18 @@ CREATE UNIQUE INDEX idx_dim_date_full ON dwh.dim_date(full_date);
 CREATE INDEX idx_dim_date_year_month ON dwh.dim_date(year, month);
 ```
 
+## Dimension: `dwh.dim_country`
+**Grain**: One row per unique country
+
+Column | Type | Description |
+|------|------|-------------|
+| `country_key` | SERIAL PK | Surrogate key |
+| `original_name` | VARCHAR | Original name from raw data |
+| `country_name` | VARCHAR | Name extracted from API |
+| `continent` | VARCHAR | Enriched via API (e.g. Europe) |
+| `iso_alpha2` | CHAR(2) | ISO Code (e.g. US) |
+| `iso_alpha3` | CHAR(3) | ISO Code (e.g. GBR) |
+
 ---
 
 ## Sample KPI Queries
@@ -233,12 +254,13 @@ FROM dwh.fact_sales;
 ### KPI 5: Revenue by Country (Top 10 Non-UK)
 ```sql
 SELECT 
-    f.country,
+    c.country_name,
     SUM(f.line_total) as total_revenue
 FROM dwh.fact_sales f
+JOIN dwh.dim_country c ON f.country_key = c.country_key  -- Now requires JOIN
 WHERE f.transaction_type = 'SALE'
-  AND f.country != 'United Kingdom'
-GROUP BY f.country
+  AND c.country_name != 'United Kingdom'
+GROUP BY c.country_name
 ORDER BY total_revenue DESC
 LIMIT 10;
 ```

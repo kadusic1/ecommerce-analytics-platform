@@ -5,6 +5,7 @@ DROP TABLE IF EXISTS dwh.dim_date CASCADE;
 DROP TABLE IF EXISTS staging.product_category_lookup CASCADE;
 DROP TABLE IF EXISTS source.ecommerce_raw CASCADE;
 DROP TABLE IF EXISTS logging.audit CASCADE;
+DROP TABLE IF EXISTS dwh.dim_country CASCADE;
 
 -- 2.1 Source Layer (Raw CSV Storage)
 CREATE TABLE IF NOT EXISTS source.ecommerce_raw (
@@ -63,6 +64,18 @@ CREATE TABLE IF NOT EXISTS dwh.dim_product (
 CREATE UNIQUE INDEX idx_dim_product_code ON dwh.dim_product(stock_code);
 CREATE INDEX idx_dim_product_category ON dwh.dim_product(category);
 
+CREATE TABLE IF NOT EXISTS dwh.dim_country (
+    country_key SERIAL PRIMARY KEY,
+    original_name VARCHAR(100) UNIQUE,
+    country_name VARCHAR(100) UNIQUE,
+    continent VARCHAR(50),
+    sub_region VARCHAR(50),
+    iso_alpha2 CHAR(2),
+    iso_alpha3 CHAR(3)
+);
+CREATE UNIQUE INDEX idx_dim_country_original ON dwh.dim_country(original_name);
+CREATE UNIQUE INDEX idx_dim_country_name ON dwh.dim_country(country_name);
+
 -- 2.4 DWH Layer (Facts)
 CREATE TABLE IF NOT EXISTS dwh.fact_sales (
     sales_key SERIAL PRIMARY KEY,
@@ -74,7 +87,7 @@ CREATE TABLE IF NOT EXISTS dwh.fact_sales (
     quantity INTEGER,
     unit_price NUMERIC(10,2),
     line_total NUMERIC(10,2),
-    country VARCHAR(100),
+    country_key INTEGER REFERENCES dwh.dim_country(country_key),
     CONSTRAINT unique_invoice_item UNIQUE (invoice_no, product_key)
 );
 
@@ -82,7 +95,7 @@ CREATE INDEX idx_fact_sales_date ON dwh.fact_sales(date_key);
 CREATE INDEX idx_fact_sales_customer ON dwh.fact_sales(customer_key);
 CREATE INDEX idx_fact_sales_product ON dwh.fact_sales(product_key);
 CREATE INDEX idx_fact_sales_type ON dwh.fact_sales(transaction_type);
-CREATE INDEX idx_fact_sales_country ON dwh.fact_sales(country);
+CREATE INDEX idx_fact_sales_country ON dwh.fact_sales(country_key);
 CREATE INDEX idx_dim_date_full_date ON dwh.dim_date(full_date);
 
 CREATE TABLE IF NOT EXISTS logging.audit (
