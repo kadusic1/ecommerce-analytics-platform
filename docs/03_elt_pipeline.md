@@ -24,7 +24,13 @@ graph TD
     L --> M[Load dim_date]
     M --> N[Load dim_customer]
     N --> O[Load dim_product]
-    O --> P[Check Orphans]
+    O --> OA[Get Unique Countries]
+    OA --> OB[Loop Over Countries]
+    OB --> OC[HTTP Request API]
+    OC --> OD[Preprocess Country Data]
+    OD --> OE[Load dim_country]
+    OE --> OB
+    OB --> P[Check Orphans]
     P --> Q[✓ Checkpoint #4: Validation]
     Q --> R[Load fact_sales]
     R --> S[Check Revenue]
@@ -251,14 +257,85 @@ INSERT INTO dwh.dim_product (stock_code, description, category)
 SELECT DISTINCT
     stockcode,
     description,
-    COALESCE(
-        (SELECT category FROM staging.product_category_lookup 
-         WHERE description ILIKE '%' || keyword || '%' 
-         ORDER BY priority ASC LIMIT 1),
-        'Uncategorized'
-    ) as category
-FROM staging.clean_sales
+    CASE
+        WHEN description IS NULL
+             OR TRIM(description) = ''
+        THEN 'Unknown'
+        ELSE COALESCE(
+            (
+                SELECT pcl.category
+                FROM staging.product_category_lookup pcl
+                WHERE s.description ILIKE '%' || pcl.keyword || '%'
+                ORDER BY pcl.priority ASC
+                LIMIT 1
+            ),
+            'Other'
+        )
+    END AS category
+FROM staging.clean_sales s
 ON CONFLICT (stock_code) DO NOTHING;
+```
+
+#### Load Country Dimension
+
+**Logic:** Fetch country metadata from RestCountries API for each unique country in the dataset. Handles API failures gracefully and provides manual mapping for special cases (e.g., "EIRE" → Ireland).
+
+**Step 1: Extract Unique Countries**
+```sql
+-- Get all unique country names from staging
+SELECT DISTINCT country 
+FROM staging.clean_sales 
+WHERE country IS NOT NULL
+```
+
+**Step 2: API Enrichment Loop**
+- **Node:** Loop Over Countries (n8n SplitInBatches)
+- **API Call:** HTTP Request to `https://restcountries.com/v3.1/name/{country}`
+- **Error Handling:** `onError: continueRegularOutput` (API failures do not stop the pipeline)
+
+**Step 3: Data Normalization**
+```javascript
+// Preprocess Country API data (n8n Code Node)
+const originalName = $('Loop Over Countries').first().json.country;
+const apiData = (items.length > 0 && items[0].json.name) ? items[0].json : null;
+
+// Manual mapping for special cases
+if (originalName === "EIRE") {
+  return {
+    json: {
+      country_name: originalName,
+      common_name: "Ireland",
+      continent: "Europe",
+      sub_region: "Northern Europe",
+      iso_alpha2: "IE",
+      iso_alpha3: "IRL",
+    }
+  }
+}
+
+// Normalize API response or use fallback values
+return {
+  json: {
+    country_name: originalName,
+    common_name: apiData ? apiData.name.common : originalName, 
+    continent: apiData ? apiData.region : 'Unknown',
+    sub_region: apiData ? apiData.subregion : 'Unknown',
+    iso_alpha2: apiData ? apiData.cca2 : 'XX',
+    iso_alpha3: apiData ? apiData.cca3 : 'XXX'
+  }
+};
+```
+
+**Step 4: Load to Dimension**
+```sql
+-- Populate dim_country with enriched data
+INSERT INTO dwh.dim_country (
+    original_name, country_name, continent, sub_region, iso_alpha2, iso_alpha3
+)
+VALUES (
+    :country_name, :common_name, :continent, :sub_region, :iso_alpha2, :iso_alpha3
+)
+ON CONFLICT (original_name) DO NOTHING;
 ```
 
 ### 4.2 Checkpoint #4: Orphan Check
@@ -271,18 +348,22 @@ SELECT
     (SELECT COUNT(*) FROM staging.clean_sales s 
      WHERE NOT EXISTS (SELECT 1 FROM dwh.dim_product p WHERE p.stock_code = s.stockcode)) as orphan_products,
     (SELECT COUNT(*) FROM staging.clean_sales s 
-     WHERE NOT EXISTS (SELECT 1 FROM dwh.dim_date d WHERE d.full_date = s.invoice_date)) as orphan_dates;
+     WHERE NOT EXISTS (SELECT 1 FROM dwh.dim_date d WHERE d.full_date = s.invoice_date)) as orphan_dates,
+    (SELECT COUNT(*) FROM staging.clean_sales s 
+     WHERE s.country IS NOT NULL 
+      AND NOT EXISTS (SELECT 1 FROM dwh.dim_country c WHERE c.original_name = s.country)) as orphan_countries;
 ```
 
 ```javascript
 // n8n Code Validator
 const p = items[0].json.orphan_products;
 const d = items[0].json.orphan_dates;
+const c = items[0].json.orphan_countries;
 
-if (p > 100 || d > 100) {
-    throw new Error(`ORPHAN ERROR: Missing ${p} Products and ${d} Dates in dimensions.`);
+if (p > 100 || d > 100 || c > 100) {
+    throw new Error(`ORPHAN ERROR: Missing ${p} Products, ${d} Dates and ${c} Countries in dimensions.`);
 }
-return [{ json: { status: 'PASS', orphan_products: p, orphan_dates: d }}];
+return [{ json: { status: 'PASS', orphan_products: p, orphan_dates: d, orphan_countries: c }}];
 ```
 
 ### 4.3 Load Facts (Safe Mode)
@@ -293,7 +374,7 @@ return [{ json: { status: 'PASS', orphan_products: p, orphan_dates: d }}];
 -- Load fact_sales with proper surrogate key references
 INSERT INTO dwh.fact_sales (
     date_key, customer_key, product_key, invoice_no, 
-    transaction_type, quantity, unit_price, line_total, country
+    transaction_type, quantity, unit_price, line_total, country_key
 )
 SELECT 
     d.date_key,
@@ -304,7 +385,7 @@ SELECT
     s.quantity,
     s.unit_price,
     (s.quantity * s.unit_price) as line_total,
-    s.country
+    co.country_key
 FROM staging.clean_sales s
 JOIN dwh.dim_date d ON d.full_date = s.invoice_date
 JOIN dwh.dim_product p ON p.stock_code = s.stockcode
@@ -312,6 +393,7 @@ JOIN dwh.dim_customer c ON c.customer_id = CASE
         WHEN s.customer_id IS NOT NULL THEN s.customer_id 
         ELSE 'GST-' || s.invoiceno 
     END
+JOIN dwh.dim_country co ON co.original_name = s.country
 ON CONFLICT (invoice_no, product_key) DO NOTHING;
 ```
 
@@ -357,11 +439,12 @@ return [{ json: { status: 'PASS', variance: variance + '%' }}];
 **Logged Metrics:**
 - `raw_row_count`: Total rows loaded from CSV
 - `funnel_gap`: Rows lost during cleaning (Checkpoint #3)
-- `orphan_count`: Sum of orphan products + orphan dates (Checkpoint #4)
+- `orphan_count`: Sum of orphan products + orphan dates + orphan countries (Checkpoint #4)
 - `revenue_variance_pct`: Revenue reconciliation variance (Checkpoint #5)
 
 **Insert Statement:**
 ```sql
+-- Audit logging happens via n8n node using dynamic expressions:
 INSERT INTO logging.audit (
     raw_row_count, 
     funnel_gap, 
@@ -369,10 +452,10 @@ INSERT INTO logging.audit (
     revenue_variance_pct
 )
 VALUES (
-    {{ checkpoint_1_loaded_rows }},
-    {{ checkpoint_3_gap }},
-    {{ checkpoint_4_orphans }},
-    {{ checkpoint_5_variance }}
+    {{ $node["Verify Load Count"].json["row_count"] }},
+    {{ $node["Checkpoint #3: Quality Funnel"].json["Data Loss Gap"] }},
+    {{ $node["Check Orphans"].json["orphan_products"] + $node["Check Orphans"].json["orphan_dates"] + $node["Check Orphans"].json["orphan_countries"] }},
+    {{ $node["Check Revenue"].json["variance_pct"] }}
 );
 ```
 
@@ -457,10 +540,11 @@ Please <a href="{{ $node["Error Trigger"].json["execution"]["url"] }}">click her
 5. Check Critical NULLs → Checkpoint #2
 6. Create staging.clean_sales → Checkpoint #3
 7. Load dim_date → Load dim_customer → Load dim_product
-8. Check Orphans → Checkpoint #4
-9. Load fact_sales
-10. Check Revenue → Checkpoint #5
-11. Audit Logging → Gmail Success
+8. Get Unique Countries → Loop Over Countries → HTTP Request → Preprocess Country Data → Load dim_country
+9. Check Orphans → Checkpoint #4
+10. Load fact_sales
+11. Check Revenue → Checkpoint #5
+12. Audit Logging → Gmail Success
 
 **Error Path:**
 - Error Trigger → Send Gmail Alert
@@ -536,7 +620,7 @@ LIMIT 10;
 
 ---
 
-**DOCUMENT VERSION:** 5.0 (SYNCHRONIZED WITH V2.JSON)  
+**DOCUMENT VERSION:** 5.0 (SYNCHRONIZED WITH V5.JSON)  
 **LAST UPDATED:** January 22, 2026  
-**WORKFLOW FILE:** `/elt/V2.json`  
+**WORKFLOW FILE:** `/elt/V5.json`  
 **RELATED:** [02_dwh_schema.md](./02_dwh_schema.md) | [00_initial_setup.md](./00_initial_setup.md)
