@@ -12,7 +12,7 @@ graph TD
     A[Manual Trigger] --> B[Truncate source table]
     B --> C[Read CSV from Disk]
     C --> D[Extract from File]
-    D --> E[Loop Over Items - Batch 2000]
+    D --> E[Loop Over Items - Batch 4000]
     E --> F[Insert into source table]
     F --> E
     E --> G[Verify Load Count]
@@ -54,7 +54,7 @@ graph TD
 ## 2. Phase 1: Extract & Load
 
 **Input:** `/files/data.csv` (541,909 rows)  
-**Tool:** n8n File Reader → Extract from File → Batched PostgreSQL Insert (2000 rows per batch)
+**Tool:** n8n File Reader → Extract from File → Batched PostgreSQL Insert (4000 rows per batch)
 
 ### Step 1: Truncate Source Table
 
@@ -70,11 +70,11 @@ TRUNCATE TABLE source.ecommerce_raw;
 **Node Configuration:**
 - **Read/Write Files from Disk:** Reads `/files/data.csv`
 - **Extract from File:** Parses CSV and converts to JSON
-- **Loop Over Items:** Splits data into batches of 2000 rows for efficient bulk loading
+- **Loop Over Items:** Splits data into batches of 4000 rows for efficient bulk loading
 
 ### Step 3: Batched Insert to Source
 
-**Logic:** Insert CSV rows into `source.ecommerce_raw` in batches of 2000. Uses `skipOnConflict` to avoid duplicate key errors.
+**Logic:** Insert CSV rows into `source.ecommerce_raw` in batches of 4000. Uses `skipOnConflict` to avoid duplicate key errors.
 
 **Column Mapping:**
 ```javascript
@@ -523,12 +523,12 @@ Please <a href="{{ $node["Error Trigger"].json["execution"]["url"] }}">click her
 
 **Workflow Name:** "ECommerce ELT"  
 **Trigger:** Manual Trigger  
-**Batch Size:** 2000 rows per insert  
+**Batch Size:** 4000 rows per insert
 **Error Handling:** Dedicated Error Trigger → Gmail Alert
 
 **Critical Node Settings:**
 - All SQL nodes: `Continue on Fail = FALSE`
-- Loop Over Items: Batch size = 2000
+- Loop Over Items: Batch size = 4000
 - Insert into source: `skipOnConflict = true`
 - All dimension/fact loads: `ON CONFLICT DO NOTHING`
 
