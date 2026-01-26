@@ -32,6 +32,7 @@ erDiagram
         string stock_code
         string description
         string category
+        string product_type
     }
 
     dim_date {
@@ -135,6 +136,7 @@ CREATE INDEX idx_dim_customer_type ON dwh.dim_customer(customer_type);
 | `stock_code` | VARCHAR(20) UNIQUE | Business key |
 | `description` | TEXT | Product name |
 | `category` | VARCHAR(100) | Derived from keyword lookup |
+| `product_type` | VARCHAR(20) | Physical or Service |
 
 **Category Derivation:**
 - Uses keyword matching (use `staging.product_category_lookup`)

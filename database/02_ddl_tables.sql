@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS dwh.dim_product (
     product_key SERIAL PRIMARY KEY,
     stock_code VARCHAR(50) UNIQUE,
     description TEXT,
-    category VARCHAR(100)
+    category VARCHAR(100),
+    product_type VARCHAR(20) DEFAULT 'Physical'
 );
 
 CREATE UNIQUE INDEX idx_dim_product_code ON dwh.dim_product(stock_code);
