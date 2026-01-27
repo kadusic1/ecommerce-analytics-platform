@@ -92,6 +92,8 @@ CSV → `source.ecommerce_raw` (batched inserts, all TEXT columns)
 **Phase 5: Audit & Notify**  
 Logs metrics to `logging.audit` table, sends success/failure email via Gmail
 
+![ELT Workflow](../elt/workflow_image.png)
+
 ---
 
 ## Apache Superset Dashboards
@@ -121,6 +123,8 @@ Logs metrics to `logging.audit` table, sends success/failure email via Gmail
 
 **Audience:** C-suite, strategic decision-makers
 
+![Executive Overview Dashboard](../superset/dashboard1_executive.jpg)
+
 ### Dashboard 2: Sales Performance (ID: 15)
 **Charts:** 10 visualizations
 - Total Orders (Big Number)
@@ -144,6 +148,8 @@ Logs metrics to `logging.audit` table, sends success/failure email via Gmail
 
 **Audience:** Sales managers, inventory planners, operations
 
+![Executive Overview Dashboard](../superset/dashboard2_sales.jpg)
+
 ### Dashboard 3: Customer Analytics (ID: 18)
 **Charts:** 9 visualizations
 - Total Customers (Big Number)
@@ -165,6 +171,8 @@ Logs metrics to `logging.audit` table, sends success/failure email via Gmail
 
 **Audience:** Marketing, CRM teams, customer success
 
+![Executive Overview Dashboard](../superset/dashboard3_customer.jpg)
+
 ### Dashboard 4: International Expansion (ID: 19)
 **Charts:** 7 visualizations
 - International Revenue (Big Number)
@@ -183,6 +191,8 @@ Logs metrics to `logging.audit` table, sends success/failure email via Gmail
 - Active Markets - Geographic reach count
 
 **Audience:** Business development, expansion strategy, regional managers
+
+![Executive Overview Dashboard](../superset/dashboard4_international.jpg)
 
 ---
 
