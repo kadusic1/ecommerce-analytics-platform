@@ -577,7 +577,7 @@
     },
     {
       "parameters": {
-        "sendTo": "kadusicadi1@gmail.com",
+        "sendTo": "put_your_email_adress_here",
         "subject": "=✅ ELT Success: {{ $today.day }}.{{ $today.month }}.{{ $today.year }}",
         "message": "=<h3>✅ Pipeline Completed Successfully</h3>\n\n<b>SUMMARY:</b><br>\n----------------------------------<br>\n<b>Rows Loaded:</b> {{ $node[\"Verify Load Count\"].json[\"row_count\"] }}<br>\n<b>Revenue Variance:</b> {{ $node[\"Checkpoint #5: Validation\"].json[\"variance\"] }}<br>\n<b>Orphans Found:</b> {{ $node[\"Check Orphans\"].json[\"orphan_products\"] }} products / {{ $node[\"Check Orphans\"].json[\"orphan_dates\"] }} dates<br>\n<br>\n<b>AUDIT LOG:</b><br>\n----------------------------------<br>\n<b>Log Entry Created:</b> Yes<br>\n<b>Gap Check:</b> {{ $node[\"Checkpoint #3: Quality Funnel\"].json[\"Data Loss Gap\"] }} rows",
         "options": {}
@@ -611,7 +611,7 @@
     },
     {
       "parameters": {
-        "sendTo": "kadusicadi1@gmail.com",
+        "sendTo": "put_your_email_adress_here",
         "subject": "🚨 ALERT: Pipeline Failed",
         "message": "=<h2 style=\"color: #D8000C;\">🚨 CRITICAL FAILURE REPORT</h2>\n\n<b>STATUS:</b> <span style=\"color: red;\"><strong>STOPPED</strong></span><br>\nThe ELT pipeline has crashed due to an error.\n<br><br>\n\n<div style=\"border: 1px solid #D8000C; background-color: #FFBABA; padding: 10px; color: #D8000C;\">\n    <b>🛑 ERROR DETAILS:</b><br>\n    <b>Message:</b> {{ $node[\"Error Trigger\"].json[\"execution\"][\"error\"][\"message\"] }}<br>\n    <b>Failed Node:</b> {{ $node[\"Error Trigger\"].json[\"execution\"][\"lastNodeExecuted\"] }}\n</div>\n<br>\n\n<b>TECHNICAL DATA:</b><br>\n----------------------------------<br>\n<b>Workflow ID:</b> {{ $workflow.id }}<br>\n<b>Execution ID:</b> {{ $execution.id }}<br>\n<b>Timestamp:</b> {{ $now }}<br>\n<br>\n\n<b>ACTION REQUIRED:</b><br>\nPlease <a href=\"{{ $node[\"Error Trigger\"].json[\"execution\"][\"url\"] }}\">click here to view the execution log</a> immediately.",
         "options": {}
