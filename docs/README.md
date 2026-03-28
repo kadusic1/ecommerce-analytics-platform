@@ -1,5 +1,4 @@
-# BI Project: E-Commerce Analytics Platform
-**University Project** | Business Intelligence
+# E-Commerce Analytics Platform
 
 ---
 
